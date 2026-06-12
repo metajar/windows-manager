@@ -135,10 +135,10 @@ func main() {
 		runFace(res.configPath)
 		return
 	case actionService:
+		defer logToFile(res.configPath, "brain.log")()
 		if err := cfg.validate(); err != nil {
 			log.Fatal(err)
 		}
-		defer logToFile(res.configPath, "brain.log")()
 		log.Printf("%s", buildinfo.String())
 		runService(cfg, res.configPath)
 		return
@@ -149,6 +149,19 @@ func main() {
 	}
 	log.Printf("%s", buildinfo.String())
 	runStandalone(cfg)
+}
+
+// fanoutWriter writes to every sink and ignores per-sink errors. This is NOT
+// io.MultiWriter on purpose: MultiWriter stops at the first error, and a
+// Windows service (or a windowless face) has an invalid stderr handle whose
+// failing writes would prevent the log file from ever being written.
+type fanoutWriter []io.Writer
+
+func (fw fanoutWriter) Write(p []byte) (int, error) {
+	for _, w := range fw {
+		_, _ = w.Write(p)
+	}
+	return len(p), nil
 }
 
 // logToFile mirrors the standard logger into a file next to the config file,
@@ -165,7 +178,7 @@ func logToFile(configPath, name string) func() {
 		log.Printf("file log unavailable at %s: %v", p, err)
 		return func() {}
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	log.SetOutput(fanoutWriter{f, os.Stderr})
 	return func() { f.Close() }
 }
 

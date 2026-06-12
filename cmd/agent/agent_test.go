@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -176,6 +178,24 @@ func TestWarnTrackerSkipsZeroAndLocked(t *testing.T) {
 	}
 	if w.check(true, 120) {
 		t.Fatal("should never warn while locked")
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write(p []byte) (int, error) { return 0, errors.New("invalid handle") }
+
+func TestFanoutWriterSurvivesFailingSink(t *testing.T) {
+	// A service's stderr is an invalid handle; a failing sink must not stop
+	// the log line from reaching the file (the bug io.MultiWriter has).
+	var buf bytes.Buffer
+	fw := fanoutWriter{failWriter{}, &buf}
+	n, err := fw.Write([]byte("hello"))
+	if err != nil || n != 5 {
+		t.Fatalf("Write = (%d, %v), want (5, nil)", n, err)
+	}
+	if buf.String() != "hello" {
+		t.Fatalf("buffer = %q, want %q", buf.String(), "hello")
 	}
 }
 
