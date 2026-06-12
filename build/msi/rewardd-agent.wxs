@@ -77,7 +77,7 @@
 
     <CustomAction Id="RewarddInstall" DllEntry="WixQuietExec"
                   Execute="deferred" Impersonate="no" Return="check"
-                  BinaryRef="Wix4UtilCA_X86" />
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" />
 
     <!-- ============================ UNINSTALL ============================ -->
     <SetProperty Id="RewarddUninstall" Sequence="execute" Before="RewarddUninstall"
@@ -85,7 +85,7 @@
 
     <CustomAction Id="RewarddUninstall" DllEntry="WixQuietExec"
                   Execute="deferred" Impersonate="no" Return="ignore"
-                  BinaryRef="Wix4UtilCA_X86" />
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" />
 
     <InstallExecuteSequence>
       <!-- Register after the files are on disk, only on fresh install/upgrade. -->

@@ -27,15 +27,19 @@ if ! command -v dotnet >/dev/null 2>&1; then
   exit 1
 fi
 
-# Install the wix tool + Util extension locally (idempotent).
+# Install the wix tool + Util extension (idempotent). CI runners need the tools
+# dir on PATH; GITHUB_PATH persists it for later steps when this script is split.
 if ! dotnet tool list --global 2>/dev/null | grep -qi '^wix '; then
   echo "==> installing wix dotnet tool (global)"
-  dotnet tool install --global wix >/dev/null 2>&1 || dotnet tool update --global wix >/dev/null
+  dotnet tool install --global wix || dotnet tool update --global wix
 fi
 export PATH="$PATH:$HOME/.dotnet/tools"
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+fi
 
 echo "==> ensuring WixToolset.Util.wixext extension"
-wix extension add -g WixToolset.Util.wixext >/dev/null 2>&1 || true
+wix extension add -g WixToolset.Util.wixext
 
 if [[ ! -f "$AGENT_EXE" ]]; then
   echo "error: agent exe not found at '$AGENT_EXE'. Build it first ('make agent')." >&2
