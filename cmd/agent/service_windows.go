@@ -194,14 +194,12 @@ func installService(cfg config, configPath string) error {
 	}
 	defer m.Disconnect()
 
-	// Idempotent: a failed MSI retry (or reinstall) may leave the service behind.
+	// Idempotent: a reinstall (or a service left behind by an older installer)
+	// just refreshes the config and bounces the existing service.
 	if s, err := m.OpenService(serviceName); err == nil {
 		defer s.Close()
 		log.Printf("service %q already exists, refreshing config and restarting", serviceName)
-		if _, err := s.Control(svc.Stop); err != nil {
-			log.Printf("stop service (ignored): %v", err)
-		}
-		time.Sleep(500 * time.Millisecond)
+		stopService(s)
 		if err := s.Start(); err != nil {
 			return fmt.Errorf("restart service: %w", err)
 		}
@@ -226,6 +224,29 @@ func installService(cfg config, configPath string) error {
 	return nil
 }
 
+// stopService asks the SCM to stop a service and waits (up to ~15s) until it
+// actually reaches Stopped. A bare Control(Stop) followed by Start/Delete races
+// the shutdown: the SCM rejects both while the service is still StopPending.
+func stopService(s *mgr.Service) {
+	status, err := s.Control(svc.Stop)
+	if err != nil {
+		log.Printf("stop service (ignored): %v", err)
+		return
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for status.State != svc.Stopped {
+		if time.Now().After(deadline) {
+			log.Printf("service did not stop within 15s, continuing anyway")
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+		if status, err = s.Query(); err != nil {
+			log.Printf("query service while stopping (ignored): %v", err)
+			return
+		}
+	}
+}
+
 // uninstallService stops and deletes the brain service and removes the config.
 func uninstallService(configPath string) error {
 	m, err := mgr.Connect()
@@ -239,11 +260,7 @@ func uninstallService(configPath string) error {
 		log.Printf("service %q not installed (ignored)", serviceName)
 	} else {
 		defer s.Close()
-		if _, err := s.Control(svc.Stop); err != nil {
-			log.Printf("stop service (ignored): %v", err)
-		}
-		// Give the SCM a moment to register the stop before delete.
-		time.Sleep(500 * time.Millisecond)
+		stopService(s)
 		if err := s.Delete(); err != nil {
 			return fmt.Errorf("delete service: %w", err)
 		}

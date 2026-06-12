@@ -94,10 +94,30 @@ sc delete rewardd-agent-svc
 ```
 
 The MSI installs `rewardd-agent.exe` to `Program Files\rewardd`, writes the
-config to `C:\ProgramData\rewardd\agent.conf`, and installs the **brain service**
-(`rewardd-agent-svc`, LocalSystem, auto-start). The brain launches the face UI
-into the logged-in session. Uninstalling stops/deletes the service and removes
-the config.
+config to `C:\ProgramData\rewardd\agent.conf`, and registers the **brain service**
+(`rewardd-agent-svc`, LocalSystem, auto-start) natively with Windows Installer.
+The brain launches the face UI into the logged-in session. Uninstalling stops
+and deletes the service and removes the config.
+
+**Upgrading:** run the new MSI with the same properties (a major upgrade
+rewrites `agent.conf`, so `SERVER`/`TOKEN`/`KIDUSER` are required again). From
+v0.0.3 onward the installer stops the running service before replacing files.
+When upgrading **from v0.0.2 or older**, stop the agent manually first —
+otherwise Windows can't replace the in-use exe and silently defers the upgrade
+to the next reboot:
+
+```bat
+net stop rewardd-agent-svc
+taskkill /f /im rewardd-agent.exe
+msiexec /i rewardd-agent.msi /qn /L*v "%TEMP%\rewardd-install.log" ^
+  SERVER="http://192.168.88.70:8080" TOKEN=your-token KIDUSER=leo PIN=1234
+```
+
+Verify what's actually running after any install:
+
+```bat
+"C:\Program Files\rewardd\rewardd-agent.exe" -version
+```
 
 | MSI property | Maps to | Default |
 | --- | --- | --- |
