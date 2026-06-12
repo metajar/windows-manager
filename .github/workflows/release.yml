@@ -1,11 +1,13 @@
 name: Release
 
-# Cut a release by pushing a tag like v1.2.3. Builds the static binaries for
-# the full target matrix, builds the Windows agent MSI, and attaches everything
-# (plus SHA256SUMS) to a GitHub Release.
+# Cut a release by pushing a version tag (v0.0.1 or 0.0.1). Builds the static
+# binaries for the full target matrix, builds the Windows agent MSI, and
+# attaches everything (plus SHA256SUMS) to a GitHub Release.
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'       # preferred: v0.0.1, v1.2.3
+      - '[0-9]*'   # also accept bare semver tags like 0.0.1
 
 permissions:
   contents: write

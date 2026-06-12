@@ -123,6 +123,18 @@ make msi        # Windows agent .msi (needs the .NET SDK + wix tool)
 make help       # list everything
 ```
 
+Cut a GitHub Release (binaries + MSI) by pushing a version tag — `v0.0.1` or
+`0.0.1` both work:
+
+```sh
+git tag v0.0.1
+git push origin v0.0.1
+```
+
+The tag must point at a commit that already includes `.github/workflows/` on
+`main`. Pushing a tag does not re-run CI; it triggers the separate Release
+workflow.
+
 Version, commit, and build date are stamped into both binaries and surfaced via
 `-version` on the CLI and `GET /version` on the server.
 
