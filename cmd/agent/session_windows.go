@@ -15,33 +15,43 @@ import (
 // These live in DLLs not fully surfaced by x/sys/windows, so we bind them by
 // hand (the same lazy-proc style as the lock overlay).
 var (
-	libKernel32 = windows.NewLazySystemDLL("kernel32.dll")
-	libWtsapi32 = windows.NewLazySystemDLL("wtsapi32.dll")
-	libUserenv  = windows.NewLazySystemDLL("userenv.dll")
+	libUserenv = windows.NewLazySystemDLL("userenv.dll")
 
-	procWTSGetActiveConsoleSessionId = libKernel32.NewProc("WTSGetActiveConsoleSessionId")
-	procWTSQueryUserToken            = libWtsapi32.NewProc("WTSQueryUserToken")
-	procCreateEnvironmentBlock       = libUserenv.NewProc("CreateEnvironmentBlock")
-	procDestroyEnvironmentBlock      = libUserenv.NewProc("DestroyEnvironmentBlock")
+	procCreateEnvironmentBlock  = libUserenv.NewProc("CreateEnvironmentBlock")
+	procDestroyEnvironmentBlock = libUserenv.NewProc("DestroyEnvironmentBlock")
 )
 
-const invalidSession = 0xFFFFFFFF
-
-// launchFaceInActiveSession starts "agent -face" inside the interactive desktop
-// of the currently logged-in user and blocks until that process exits (so the
-// caller can relaunch it). The brain runs as SYSTEM in session 0, which cannot
-// draw UI; this CreateProcessAsUser dance is how a session-0 service places a
-// process on the user's visible desktop.
-func launchFaceInActiveSession(ctx context.Context, configPath string) error {
-	r, _, _ := procWTSGetActiveConsoleSessionId.Call()
-	session := uint32(r)
-	if session == invalidSession {
-		return fmt.Errorf("no active console session (nobody logged in)")
+// activeSessions returns the IDs of every session a user is actively using:
+// the physical console and/or RDP sessions. WTSGetActiveConsoleSessionId alone
+// was wrong here — while someone is connected over RDP the physical console is
+// parked at the logon screen with no user token, so the brain spun forever on
+// "token does not exist" and never raised a lock anywhere.
+func activeSessions() ([]uint32, error) {
+	var info *windows.WTS_SESSION_INFO
+	var count uint32
+	if err := windows.WTSEnumerateSessions(0, 0, 1, &info, &count); err != nil {
+		return nil, fmt.Errorf("WTSEnumerateSessions: %w", err)
 	}
+	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(info)))
 
+	var out []uint32
+	for _, s := range unsafe.Slice(info, count) {
+		if s.State == windows.WTSActive {
+			out = append(out, s.SessionID)
+		}
+	}
+	return out, nil
+}
+
+// launchFaceInSession starts "agent -face" inside the interactive desktop of
+// the given session and blocks until that process exits (so the caller can
+// relaunch it). The brain runs as SYSTEM in session 0, which cannot draw UI;
+// this CreateProcessAsUser dance is how a session-0 service places a process
+// on a user's visible desktop.
+func launchFaceInSession(ctx context.Context, configPath string, session uint32) error {
 	var userTok windows.Token
-	if r, _, err := procWTSQueryUserToken.Call(uintptr(session), uintptr(unsafe.Pointer(&userTok))); r == 0 {
-		return fmt.Errorf("WTSQueryUserToken: %w", err)
+	if err := windows.WTSQueryUserToken(session, &userTok); err != nil {
+		return fmt.Errorf("WTSQueryUserToken(session %d): %w", session, err)
 	}
 	defer userTok.Close()
 

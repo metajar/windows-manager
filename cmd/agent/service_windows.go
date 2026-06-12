@@ -161,29 +161,52 @@ func serveFaceConn(ctx context.Context, conn net.Conn, ctrl *LockController) {
 	}
 }
 
-// watchFace keeps a face process alive in the active console session. It blocks
-// while a face runs and relaunches it after it exits, so terminating the UI
-// only blanks the screen for a moment before it returns. Every attempt and
+// watchFace keeps a face process alive in every active user session — the
+// physical console and any RDP sessions — relaunching faces as they exit and
+// picking up new sessions as users log in or connect. Every attempt and
 // outcome is logged: a face that silently never launches means an unlocked
 // screen, the worst failure mode this agent has.
 func (b *brain) watchFace(ctx context.Context) {
+	var mu sync.Mutex
+	running := map[uint32]bool{} // session id -> face goroutine alive
+
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-		log.Printf("launching face into the active console session")
-		err := launchFaceInActiveSession(ctx, b.configPath)
-		delay := time.Second // breathe between clean exits; never hot-loop
+		sessions, err := activeSessions()
 		if err != nil {
-			log.Printf("launch face: %v", err)
-			delay = 5 * time.Second
-		} else {
-			log.Printf("face exited; relaunching")
+			log.Printf("enumerate sessions: %v", err)
+		}
+		for _, sid := range sessions {
+			mu.Lock()
+			already := running[sid]
+			if !already {
+				running[sid] = true
+			}
+			mu.Unlock()
+			if already {
+				continue
+			}
+			go func(sid uint32) {
+				defer func() { mu.Lock(); delete(running, sid); mu.Unlock() }()
+				log.Printf("launching face into session %d", sid)
+				if err := launchFaceInSession(ctx, b.configPath, sid); err != nil {
+					log.Printf("launch face in session %d: %v", sid, err)
+					// Hold the slot briefly so a broken session isn't hammered;
+					// the next tick after this returns may retry it.
+					select {
+					case <-ctx.Done():
+					case <-time.After(5 * time.Second):
+					}
+					return
+				}
+				log.Printf("face in session %d exited", sid)
+			}(sid)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(delay):
+		case <-t.C:
 		}
 	}
 }
