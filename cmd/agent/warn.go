@@ -1,12 +1,18 @@
 package main
 
+import "time"
+
 // Low-time warning: when an unlocked session drops to five minutes remaining,
-// the overlay pops a one-shot notice so the kid isn't blindsided by the lock.
+// the overlay shows a one-shot banner so the kid isn't blindsided by the lock.
 
 const (
 	lowTimeWarnSeconds = 5 * 60
-	lowTimeWarnTitle   = "rewardd"
 	lowTimeWarnText    = "5 minutes remaining please purchase more time in choremore.org"
+
+	// lowTimeWarnShowFor is how long the banner stays up. It must auto-hide:
+	// nothing in a fullscreen game session can be relied on to dismiss it, and
+	// a stale warning lingering under the lock overlay is worse than none.
+	lowTimeWarnShowFor = 30 * time.Second
 )
 
 // warnTracker decides when to fire the low-time warning. It fires at most once

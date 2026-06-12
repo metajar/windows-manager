@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -39,7 +40,6 @@ var (
 	pLoadCursorW       = user32.NewProc("LoadCursorW")
 	pSetWindowsHookExW = user32.NewProc("SetWindowsHookExW")
 	pCallNextHookEx    = user32.NewProc("CallNextHookEx")
-	pMessageBoxW       = user32.NewProc("MessageBoxW")
 
 	pCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
 	pSetTextColor     = gdi32.NewProc("SetTextColor")
@@ -51,15 +51,20 @@ var (
 )
 
 const (
-	wsPopup        = 0x80000000
-	wsExTopmost    = 0x00000008
-	wsExToolWindow = 0x00000080
+	wsPopup         = 0x80000000
+	wsExTopmost     = 0x00000008
+	wsExTransparent = 0x00000020
+	wsExToolWindow  = 0x00000080
+	wsExNoActivate  = 0x08000000
 
-	swHide = 0
-	swShow = 5
+	swHide           = 0
+	swShowNoActivate = 4
+	swShow           = 5
 
+	swpNoActivate = 0x0010
 	swpShowWindow = 0x0040
 
+	smCXScreen  = 0
 	smXVirtual  = 76
 	smYVirtual  = 77
 	smCXVirtual = 78
@@ -87,10 +92,6 @@ const (
 	vkLWin   = 0x5B
 	vkRWin   = 0x5C
 	vkF4     = 0x73
-
-	mbIconWarning   = 0x00000030
-	mbSetForeground = 0x00010000
-	mbTopmost       = 0x00040000
 )
 
 // HWND_TOPMOST is (HWND)-1.
@@ -161,7 +162,13 @@ var (
 	pinState     atomic.Int32
 	lastPinState int32 // loop-thread copy, to detect repaint-worthy changes
 
-	gWarn warnTracker
+	// Low-time warning banner. Only the message-loop thread touches these.
+	gWarn        warnTracker
+	gWarnHWND    uintptr
+	warnVisible  bool
+	warnDeadline time.Time
+	warnBrush    uintptr
+	warnW, warnH int32
 
 	fontBig   uintptr
 	fontMid   uintptr
@@ -225,6 +232,8 @@ func runOverlay(ctx context.Context, ctrl *LockController) {
 		log.Fatalf("CreateWindowExW: %v", err)
 	}
 	gHWND = hwnd
+
+	createWarnBanner(hInst, cursor)
 
 	fontBig = makeFont(-72, 800)
 	fontMid = makeFont(-34, 600)
@@ -293,8 +302,9 @@ func wndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 func tick(hwnd uintptr) {
 	locked := gCtrl.Locked()
 	if gWarn.check(locked, gCtrl.Remaining()) {
-		showLowTimeWarning()
+		showWarnBanner()
 	}
+	updateWarnBanner(locked)
 	if locked {
 		if !gVisible {
 			// Locked transition: show, raise to top, and grab focus exactly
@@ -371,18 +381,106 @@ func submitPINAsync(pin string) {
 	}()
 }
 
-// showLowTimeWarning pops a topmost "5 minutes remaining" notice over the
-// game. MessageBoxW blocks in its own modal loop until dismissed, so it runs
-// on a goroutine rather than the overlay's message-loop thread; the blocking
-// syscall pins its thread, so no LockOSThread is needed.
-func showLowTimeWarning() {
+// createWarnBanner registers and creates the (hidden) low-time warning strip
+// along the top of the primary monitor. A MessageBox proved useless here: it
+// sat behind the fullscreen game until the lock overlay revealed it, and it
+// blocked forever waiting for an OK nobody could click. The banner is our own
+// window, so the tick can re-assert its z-order above the game, and it is
+// no-activate + click-through so it never steals the game's input.
+func createWarnBanner(hInst, cursor uintptr) {
+	warnBrush, _, _ = pCreateSolidBrush.Call(0x00226ab8) // amber, COLORREF is BGR
+
+	className := u16("rewarddWarn")
+	wc := wndClassExW{
+		style:         0x0003, // CS_HREDRAW|CS_VREDRAW
+		lpfnWndProc:   syscall.NewCallback(warnProc),
+		hInstance:     hInst,
+		hCursor:       cursor,
+		hbrBackground: warnBrush,
+		lpszClassName: className,
+	}
+	wc.cbSize = uint32(unsafe.Sizeof(wc))
+	if ret, _, err := pRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); ret == 0 {
+		log.Printf("warning: banner class not registered: %v", err)
+		return
+	}
+
+	warnW = int32(metric(smCXScreen))
+	warnH = 110
+	hwnd, _, err := pCreateWindowExW.Call(
+		wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(u16("rewardd warning"))),
+		wsPopup,
+		0, 0, uintptr(warnW), uintptr(warnH),
+		0, 0, hInst, 0,
+	)
+	if hwnd == 0 {
+		log.Printf("warning: banner window not created: %v", err)
+		return
+	}
+	gWarnHWND = hwnd
+}
+
+func warnProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
+	switch message {
+	case wmPaint:
+		paintWarn(hwnd)
+		return 0
+	case wmDestroy:
+		return 0
+	}
+	r, _, _ := pDefWindowProcW.Call(hwnd, uintptr(message), wParam, lParam)
+	return r
+}
+
+// showWarnBanner reveals the banner without taking focus from the game and
+// starts its auto-hide clock.
+func showWarnBanner() {
 	log.Println("low-time warning: 5 minutes remaining")
-	go func() {
-		pMessageBoxW.Call(0,
-			uintptr(unsafe.Pointer(u16(lowTimeWarnText))),
-			uintptr(unsafe.Pointer(u16(lowTimeWarnTitle))),
-			mbIconWarning|mbSetForeground|mbTopmost)
-	}()
+	if gWarnHWND == 0 {
+		return
+	}
+	warnDeadline = time.Now().Add(lowTimeWarnShowFor)
+	pShowWindow.Call(gWarnHWND, swShowNoActivate)
+	warnVisible = true
+	pInvalidateRect.Call(gWarnHWND, 0, 1)
+}
+
+// updateWarnBanner runs every 250ms tick. While the banner is up it re-asserts
+// topmost (without activating) so the game cannot bury it, and hides it once
+// the timeout passes, the lock takes over the screen, or a parent grants
+// enough time that the warning no longer applies.
+func updateWarnBanner(locked bool) {
+	if !warnVisible || gWarnHWND == 0 {
+		return
+	}
+	if locked || time.Now().After(warnDeadline) || gCtrl.Remaining() > lowTimeWarnSeconds {
+		pShowWindow.Call(gWarnHWND, swHide)
+		warnVisible = false
+		return
+	}
+	pSetWindowPos.Call(gWarnHWND, hwndTopmost,
+		0, 0, uintptr(warnW), uintptr(warnH), swpShowWindow|swpNoActivate)
+}
+
+func paintWarn(hwnd uintptr) {
+	var ps paintStruct
+	hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+
+	var rc rect
+	pGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
+	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), warnBrush)
+
+	pSetBkMode.Call(hdc, bkTransparent)
+	pSelectObject.Call(hdc, fontMid)
+	pSetTextColor.Call(hdc, 0x00FFFFFF)
+	rr := rc
+	pDrawTextW.Call(hdc, uintptr(unsafe.Pointer(u16(lowTimeWarnText))), ^uintptr(0),
+		uintptr(unsafe.Pointer(&rr)),
+		dtCenter|dtVCenter|dtSingleLine|dtNoPrefix)
+
+	pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 }
 
 func paint(hwnd uintptr) {
