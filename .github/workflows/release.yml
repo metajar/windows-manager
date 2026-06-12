@@ -1,8 +1,7 @@
 name: Release
 
-# Cut a release by pushing a version tag (v0.0.1 or 0.0.1). Builds the static
-# binaries for the full target matrix, builds the Windows agent MSI, and
-# attaches everything (plus SHA256SUMS) to a GitHub Release.
+# Cut a release by pushing a version tag (v0.0.1 or 0.0.1). Cross-compiles
+# binaries on Linux; builds the MSI on Windows (WiX requires Windows APIs).
 on:
   push:
     tags:
@@ -13,8 +12,10 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,19 +36,53 @@ jobs:
       - name: Build binaries (matrix + checksums)
         run: make release VERSION=${{ steps.v.outputs.version }}
 
-      - name: Setup .NET (for WiX)
-        uses: actions/setup-dotnet@v4
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-binaries
+          path: dist/*
+
+  msi:
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-binaries
+          path: dist
+
       - name: Build Windows agent MSI
+        shell: bash
         run: |
-          VERSION=${{ steps.v.outputs.version }} \
+          VERSION=${{ needs.build.outputs.version }} \
           AGENT_EXE="$PWD/dist/rewardd-agent-windows-amd64.exe" \
-          OUT="$PWD/dist/rewardd-agent-${{ steps.v.outputs.version }}.msi" \
+          OUT="$PWD/dist/rewardd-agent-${VERSION}.msi" \
           bash build/msi/build-msi.sh
 
-      - name: Refresh checksums (include MSI)
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-release
+          path: dist/*
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [build, msi]
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-release
+          path: dist
+
+      - name: Refresh checksums
         working-directory: dist
         run: sha256sum * > SHA256SUMS
 
