@@ -1,0 +1,16 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.msi
+
+# Test / coverage
+coverage.out
+*.test
+
+# Runtime state
+rewardd.json
+*.json.tmp
+
+# OS / editor cruft
+.DS_Store

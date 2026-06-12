@@ -1,0 +1,53 @@
+[Unit]
+Description=rewardd time-bank server
+Documentation=https://github.com/your-org/rewardd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Configuration lives here; see server.env.example. REWARDD_TOKEN is required.
+EnvironmentFile=/etc/rewardd/server.env
+ExecStart=/usr/local/bin/rewardd-server
+Restart=on-failure
+RestartSec=2s
+
+# Run as a dedicated unprivileged user created by install-server.sh.
+User=rewardd
+Group=rewardd
+
+# State (the JSON db) lives in /var/lib/rewardd, managed by systemd.
+StateDirectory=rewardd
+WorkingDirectory=/var/lib/rewardd
+
+# Graceful stop: the server drains connections on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# --- Hardening: this service only needs to listen on a port and write one
+# --- file under its StateDirectory. Lock everything else down.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX v4/v5 source for the rewardd Windows agent installer.
+
+  Build it with build-msi.sh (which calls the `wix` dotnet tool). The MSI:
+    * installs rewardd-agent.exe into "Program Files\rewardd"
+    * runs `rewardd-agent.exe -install-service ...` which writes the config file
+      (ProgramData\rewardd\agent.conf) and installs the "brain" Windows service
+      (runs as LocalSystem, auto-start)
+    * on uninstall, runs `rewardd-agent.exe -uninstall-service` to stop/delete
+      the service and remove the config file
+
+  Configuration is supplied at install time as MSI properties, e.g.:
+    msiexec /i rewardd-agent.msi /qn ^
+      SERVER=http://homelab:8080 TOKEN=xxxx KIDUSER=leo PIN=1234
+
+  This installs the hardened brain/face split. The brain service holds the API
+  token and the accounting and decides lock state; it cannot draw UI itself
+  (session-0 services have no interactive desktop), so it launches a per-session
+  "face" process (rewardd-agent.exe -face) into the logged-in user's desktop and
+  relaunches it if it is killed. Killing the face therefore never buys free play.
+
+  (For the simpler v1 single-process model, skip the MSI and run
+  `rewardd-agent.exe -install ...`, which registers a logon scheduled task.)
+
+  The QuietExec deferred-custom-action pattern below is the standard WiX idiom
+  for running an installed exe as SYSTEM with property-derived arguments. The
+  CA entry point WixQuietExec and the property WixQuietExecCmdLine are provided
+  by the WixToolset.Util.wixext extension (added in build-msi.sh). If your WiX
+  version names the util CA binary differently, adjust DllEntry accordingly.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="rewardd agent"
+           Manufacturer="rewardd"
+           Version="$(var.Version)"
+           UpgradeCode="6f3a1c2e-7b8d-4e1a-9c0f-2a4b6d8e0f11"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the rewardd agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Install-time configuration. All are public (UPPERCASE) so they can be
+         passed on the msiexec command line; sensible defaults where possible. -->
+    <Property Id="SERVER" Secure="yes" />
+    <Property Id="TOKEN" Secure="yes" />
+    <Property Id="KIDUSER" Secure="yes" />
+    <Property Id="MACHINE" Secure="yes" />
+    <Property Id="PIN" Secure="yes" />
+    <Property Id="INTERVAL" Secure="yes" Value="20" />
+    <Property Id="GRACE" Secure="yes" Value="30" />
+
+    <!-- Fail fast on a silent install if the essentials are missing. -->
+    <Launch Condition="Installed OR (SERVER AND TOKEN AND KIDUSER)"
+            Message="SERVER, TOKEN and KIDUSER are required. Example: msiexec /i rewardd-agent.msi SERVER=http://host:8080 TOKEN=... KIDUSER=leo" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="rewardd">
+        <Component Id="AgentExeComponent" Guid="*">
+          <File Id="AgentExe" Source="$(var.AgentExe)" KeyPath="yes" Name="rewardd-agent.exe" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="rewardd agent" Level="1">
+      <ComponentRef Id="AgentExeComponent" />
+    </Feature>
+
+    <!-- ============================= INSTALL ============================= -->
+    <!-- Set the deferred CA's data (its CustomActionData) to the full command
+         line. SetProperty Id == CA Id is the convention that wires the value
+         through to the deferred action. -->
+    <SetProperty Id="RewarddInstall" Sequence="execute" Before="RewarddInstall"
+                 Value="&quot;[#AgentExe]&quot; -install-service -config &quot;[CommonAppDataFolder]rewardd\agent.conf&quot; -server &quot;[SERVER]&quot; -token &quot;[TOKEN]&quot; -user &quot;[KIDUSER]&quot; -machine &quot;[MACHINE]&quot; -pin &quot;[PIN]&quot; -interval [INTERVAL] -grace [GRACE]" />
+
+    <CustomAction Id="RewarddInstall" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="check"
+                  BinaryRef="Wix4UtilCA_X86" />
+
+    <!-- ============================ UNINSTALL ============================ -->
+    <SetProperty Id="RewarddUninstall" Sequence="execute" Before="RewarddUninstall"
+                 Value="&quot;[#AgentExe]&quot; -uninstall-service -config &quot;[CommonAppDataFolder]rewardd\agent.conf&quot;" />
+
+    <CustomAction Id="RewarddUninstall" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="ignore"
+                  BinaryRef="Wix4UtilCA_X86" />
+
+    <InstallExecuteSequence>
+      <!-- Register after the files are on disk, only on fresh install/upgrade. -->
+      <Custom Action="RewarddInstall" After="InstallFiles" Condition="NOT Installed" />
+      <!-- Tear down before the exe is removed, only on real uninstall. -->
+      <Custom Action="RewarddUninstall" Before="RemoveFiles" Condition="(REMOVE=&quot;ALL&quot;) AND (NOT UPGRADINGPRODUCTCODE)" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>

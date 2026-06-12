@@ -1,0 +1,56 @@
+name: Release
+
+# Cut a release by pushing a tag like v1.2.3. Builds the static binaries for
+# the full target matrix, builds the Windows agent MSI, and attaches everything
+# (plus SHA256SUMS) to a GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Set version
+        id: v
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build binaries (matrix + checksums)
+        run: make release VERSION=${{ steps.v.outputs.version }}
+
+      - name: Setup .NET (for WiX)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build Windows agent MSI
+        run: |
+          VERSION=${{ steps.v.outputs.version }} \
+          AGENT_EXE="$PWD/dist/rewardd-agent-windows-amd64.exe" \
+          OUT="$PWD/dist/rewardd-agent-${{ steps.v.outputs.version }}.msi" \
+          bash build/msi/build-msi.sh
+
+      - name: Refresh checksums (include MSI)
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
