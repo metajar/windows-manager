@@ -120,6 +120,8 @@ func (b *brain) servePipe(ctx context.Context, ctrl *LockController) {
 // attempts via the shared controller (which talks to the server / local PIN).
 func serveFaceConn(ctx context.Context, conn net.Conn, ctrl *LockController) {
 	defer conn.Close()
+	log.Printf("face connected over the pipe")
+	defer log.Printf("face pipe connection closed")
 
 	// Inbound: PIN attempts.
 	go func() {
@@ -161,19 +163,27 @@ func serveFaceConn(ctx context.Context, conn net.Conn, ctrl *LockController) {
 
 // watchFace keeps a face process alive in the active console session. It blocks
 // while a face runs and relaunches it after it exits, so terminating the UI
-// only blanks the screen for a moment before it returns.
+// only blanks the screen for a moment before it returns. Every attempt and
+// outcome is logged: a face that silently never launches means an unlocked
+// screen, the worst failure mode this agent has.
 func (b *brain) watchFace(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := launchFaceInActiveSession(ctx, b.configPath); err != nil {
+		log.Printf("launching face into the active console session")
+		err := launchFaceInActiveSession(ctx, b.configPath)
+		delay := time.Second // breathe between clean exits; never hot-loop
+		if err != nil {
 			log.Printf("launch face: %v", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
+			delay = 5 * time.Second
+		} else {
+			log.Printf("face exited; relaunching")
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
 		}
 	}
 }

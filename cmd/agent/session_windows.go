@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"unsafe"
 
@@ -90,6 +91,7 @@ func launchFaceInActiveSession(ctx context.Context, configPath string) error {
 	}
 	defer windows.CloseHandle(pi.Thread)
 	defer windows.CloseHandle(pi.Process)
+	log.Printf("face started in session %d (pid %d)", session, pi.ProcessId)
 
 	// Wait for the face to exit, polling so a service stop can terminate it.
 	for {

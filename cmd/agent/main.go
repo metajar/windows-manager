@@ -21,10 +21,12 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -128,6 +130,7 @@ func main() {
 		return
 	case actionFace:
 		// The face needs no server/token: it mirrors the brain over the pipe.
+		defer logToFile(res.configPath, "face.log")()
 		log.Printf("%s", buildinfo.String())
 		runFace(res.configPath)
 		return
@@ -135,6 +138,7 @@ func main() {
 		if err := cfg.validate(); err != nil {
 			log.Fatal(err)
 		}
+		defer logToFile(res.configPath, "brain.log")()
 		log.Printf("%s", buildinfo.String())
 		runService(cfg, res.configPath)
 		return
@@ -145,6 +149,24 @@ func main() {
 	}
 	log.Printf("%s", buildinfo.String())
 	runStandalone(cfg)
+}
+
+// logToFile mirrors the standard logger into a file next to the config file,
+// returning a close func. The brain runs as a session-0 service and the face
+// runs windowless in the kid's session, so stderr for both is a black hole;
+// these files are the only way to see why something fails in the field.
+func logToFile(configPath, name string) func() {
+	if configPath == "" {
+		return func() {}
+	}
+	p := filepath.Join(filepath.Dir(configPath), name)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Printf("file log unavailable at %s: %v", p, err)
+		return func() {}
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	return func() { f.Close() }
 }
 
 // newEngine builds the heartbeat client and the lock controller shared by the
