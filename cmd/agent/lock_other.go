@@ -15,6 +15,7 @@ func runOverlay(ctx context.Context, ctrl *LockController) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	var lastLocked = !ctrl.Locked() // force first log
+	var warn warnTracker
 	for {
 		select {
 		case <-ctx.Done():
@@ -22,6 +23,9 @@ func runOverlay(ctx context.Context, ctrl *LockController) {
 			return
 		case <-t.C:
 			locked := ctrl.Locked()
+			if warn.check(locked, ctrl.Remaining()) {
+				log.Printf("[WARN] popup would show: %s", lowTimeWarnText)
+			}
 			if locked != lastLocked {
 				if locked {
 					log.Printf("[LOCK] screen would be covered (online=%v)", ctrl.Online())

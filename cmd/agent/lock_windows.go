@@ -39,6 +39,7 @@ var (
 	pLoadCursorW       = user32.NewProc("LoadCursorW")
 	pSetWindowsHookExW = user32.NewProc("SetWindowsHookExW")
 	pCallNextHookEx    = user32.NewProc("CallNextHookEx")
+	pMessageBoxW       = user32.NewProc("MessageBoxW")
 
 	pCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
 	pSetTextColor     = gdi32.NewProc("SetTextColor")
@@ -86,6 +87,10 @@ const (
 	vkLWin   = 0x5B
 	vkRWin   = 0x5C
 	vkF4     = 0x73
+
+	mbIconWarning   = 0x00000030
+	mbSetForeground = 0x00010000
+	mbTopmost       = 0x00040000
 )
 
 // HWND_TOPMOST is (HWND)-1.
@@ -155,6 +160,8 @@ var (
 
 	pinState     atomic.Int32
 	lastPinState int32 // loop-thread copy, to detect repaint-worthy changes
+
+	gWarn warnTracker
 
 	fontBig   uintptr
 	fontMid   uintptr
@@ -285,6 +292,9 @@ func wndProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 
 func tick(hwnd uintptr) {
 	locked := gCtrl.Locked()
+	if gWarn.check(locked, gCtrl.Remaining()) {
+		showLowTimeWarning()
+	}
 	if locked {
 		if !gVisible {
 			// Locked transition: show, raise to top, and grab focus exactly
@@ -358,6 +368,20 @@ func submitPINAsync(pin string) {
 			return
 		}
 		pinState.Store(pinWrong)
+	}()
+}
+
+// showLowTimeWarning pops a topmost "5 minutes remaining" notice over the
+// game. MessageBoxW blocks in its own modal loop until dismissed, so it runs
+// on a goroutine rather than the overlay's message-loop thread; the blocking
+// syscall pins its thread, so no LockOSThread is needed.
+func showLowTimeWarning() {
+	log.Println("low-time warning: 5 minutes remaining")
+	go func() {
+		pMessageBoxW.Call(0,
+			uintptr(unsafe.Pointer(u16(lowTimeWarnText))),
+			uintptr(unsafe.Pointer(u16(lowTimeWarnTitle))),
+			mbIconWarning|mbSetForeground|mbTopmost)
 	}()
 }
 

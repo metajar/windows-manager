@@ -132,6 +132,53 @@ func TestTickCountdown(t *testing.T) {
 	}
 }
 
+func TestWarnTrackerFiresOnceOnCrossing(t *testing.T) {
+	var w warnTracker
+	// Plenty of time: no warning.
+	if w.check(false, 600) {
+		t.Fatal("should not warn above threshold")
+	}
+	// Drops to the threshold: fire exactly once.
+	if !w.check(false, lowTimeWarnSeconds) {
+		t.Fatal("should warn when crossing the threshold")
+	}
+	if w.check(false, 299) || w.check(false, 100) {
+		t.Fatal("should not warn again while still low")
+	}
+	// Lock at zero: no warning, and the lock re-arms it.
+	if w.check(true, 0) {
+		t.Fatal("should not warn while locked")
+	}
+	// Unlocked again with low time (e.g. small grant): warn again.
+	if !w.check(false, 240) {
+		t.Fatal("should warn again after re-arm via lock")
+	}
+}
+
+func TestWarnTrackerRearmsOnGrant(t *testing.T) {
+	var w warnTracker
+	if !w.check(false, 200) {
+		t.Fatal("should warn on first low-time observation")
+	}
+	// Parent grants time, remaining jumps above the threshold: re-arm.
+	if w.check(false, 1800) {
+		t.Fatal("should not warn above threshold")
+	}
+	if !w.check(false, 300) {
+		t.Fatal("should warn again on the next descent")
+	}
+}
+
+func TestWarnTrackerSkipsZeroAndLocked(t *testing.T) {
+	var w warnTracker
+	if w.check(false, 0) {
+		t.Fatal("zero remaining locks instead of warning")
+	}
+	if w.check(true, 120) {
+		t.Fatal("should never warn while locked")
+	}
+}
+
 func TestHeartbeatLoopRespectsContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"allowed": true, "remaining_seconds": 60, "heartbeat_interval": 1})
