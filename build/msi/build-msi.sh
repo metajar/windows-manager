@@ -45,9 +45,10 @@ if [[ "$installed_wix" != "$WIX_VERSION" ]]; then
   dotnet tool install --global wix --version "$WIX_VERSION"
 fi
 
-echo "==> ensuring WixToolset.Util.wixext extension"
+UTIL_EXT="WixToolset.Util.wixext/${WIX_VERSION}"
+echo "==> ensuring $UTIL_EXT extension"
 wix extension remove -g WixToolset.Util.wixext 2>/dev/null || true
-wix extension add -g WixToolset.Util.wixext
+wix extension add -g "$UTIL_EXT"
 
 if [[ ! -f "$AGENT_EXE" ]]; then
   echo "error: agent exe not found at '$AGENT_EXE'. Build it first ('make agent')." >&2
@@ -56,10 +57,17 @@ fi
 
 mkdir -p "$(dirname "$OUT")"
 
+# WiX on Windows expects Windows paths for bind variables (Git Bash uses /d/a/...).
+if command -v cygpath >/dev/null 2>&1; then
+  AGENT_EXE="$(cygpath -w "$AGENT_EXE")"
+  OUT="$(cygpath -w "$OUT")"
+fi
+
 echo "==> building MSI version $MSI_VERSION -> $OUT"
+echo "    agent: $AGENT_EXE"
 wix build rewardd-agent.wxs \
   -arch x64 \
-  -ext WixToolset.Util.wixext \
+  -ext "$UTIL_EXT" \
   -d "Version=$MSI_VERSION" \
   -d "AgentExe=$AGENT_EXE" \
   -o "$OUT"
