@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -133,13 +135,26 @@ type kbdLLHookStruct struct {
 	dwExtraInfo uintptr
 }
 
+// PIN verification states. The submit round trip (server or pipe) can take
+// seconds, so it must never run on the message-loop thread; these atomics
+// carry the state between the worker goroutine and the painter.
+const (
+	pinIdle     int32 = iota // normal prompt
+	pinChecking              // attempt in flight
+	pinWrong                 // last attempt rejected
+)
+
 // Package-level UI state. Only the message-loop thread touches hwnd/pinBuf/
-// visible; the controller is read via atomics from both the loop and the hook.
+// visible; the controller and pinState are read via atomics from the loop,
+// the hook, and the PIN worker goroutine.
 var (
 	gCtrl    *LockController
 	gHWND    uintptr
 	gVisible bool
 	pinBuf   []rune
+
+	pinState     atomic.Int32
+	lastPinState int32 // loop-thread copy, to detect repaint-worthy changes
 
 	fontBig   uintptr
 	fontMid   uintptr
@@ -160,7 +175,14 @@ func u16(s string) *uint16 {
 func runOverlay(ctx context.Context, ctrl *LockController) {
 	gCtrl = ctrl
 
-	// Win32 windows are thread-affine: the loop must own one OS thread.
+	// Win32 windows are thread-affine: the window must be created, hooked, and
+	// pumped from the same OS thread. Without this pin the Go scheduler migrates
+	// the goroutine between threads and the window stops receiving messages
+	// entirely — it shows as "Not Responding", keystrokes go nowhere, and the
+	// WM_TIMER that hides the overlay after a grant never fires.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	hInst, _, _ := pGetModuleHandleW.Call(0)
 	cursor, _, _ := pLoadCursorW.Call(0, 32512) // IDC_ARROW
 	bgBrush, _, _ = pCreateSolidBrush.Call(0x000A0A0A)
@@ -201,7 +223,9 @@ func runOverlay(ctx context.Context, ctrl *LockController) {
 	fontMid = makeFont(-34, 600)
 	fontSmall = makeFont(-22, 400)
 
-	// 250ms tick drives show/hide and topmost re-assertion.
+	// 250ms tick drives show/hide, topmost re-assertion, and repaint when the
+	// controller's lock/remaining state changes underneath us (e.g. a parent
+	// grants time and the next heartbeat clears the lock).
 	pSetTimer.Call(hwnd, 1, 250, 0)
 
 	// Install the low-level keyboard hook on this thread.
@@ -263,19 +287,30 @@ func tick(hwnd uintptr) {
 	locked := gCtrl.Locked()
 	if locked {
 		if !gVisible {
+			// Locked transition: show, raise to top, and grab focus exactly
+			// once. Re-running SetForegroundWindow on every 250ms tick (the old
+			// behavior) fights the user's own clicks and makes Windows mark the
+			// window "Not Responding"; we only need to assert it on show.
 			pShowWindow.Call(hwnd, swShow)
 			gVisible = true
+			pSetWindowPos.Call(hwnd, hwndTopmost,
+				uintptr(vx), uintptr(vy), uintptr(vw), uintptr(vh), swpShowWindow)
+			pSetForegroundWin.Call(hwnd)
+			pinBuf = pinBuf[:0]
+			pinState.Store(pinIdle)
+			lastPinState = pinIdle
+			pInvalidateRect.Call(hwnd, 0, 1)
+		} else if ps := pinState.Load(); ps != lastPinState {
+			// PIN worker reported a result: repaint the prompt.
+			lastPinState = ps
 			pInvalidateRect.Call(hwnd, 0, 1)
 		}
-		// Keep ourselves glued to the top and focused so alt-tab/click cannot
-		// expose the desktop. The keyboard hook handles the hotkeys.
-		pSetWindowPos.Call(hwnd, hwndTopmost,
-			uintptr(vx), uintptr(vy), uintptr(vw), uintptr(vh), swpShowWindow)
-		pSetForegroundWin.Call(hwnd)
 	} else if gVisible {
 		pShowWindow.Call(hwnd, swHide)
 		gVisible = false
 		pinBuf = pinBuf[:0]
+		pinState.Store(pinIdle)
+		lastPinState = pinIdle
 	}
 }
 
@@ -283,12 +318,16 @@ func handleChar(hwnd uintptr, ch rune) {
 	if !gCtrl.Locked() {
 		return
 	}
+	// Ignore typing while a previous attempt is still being checked.
+	if pinState.Load() == pinChecking {
+		return
+	}
 	switch ch {
 	case '\r', '\n': // Enter: submit
 		pin := string(pinBuf)
 		pinBuf = pinBuf[:0]
-		if pin != "" && gCtrl.SubmitPIN(pin) {
-			// Unlock; tick() will hide on the next pass.
+		if pin != "" {
+			submitPINAsync(pin)
 		}
 		pInvalidateRect.Call(hwnd, 0, 1)
 	case '\b': // Backspace
@@ -299,9 +338,27 @@ func handleChar(hwnd uintptr, ch rune) {
 	default:
 		if ch >= ' ' && len(pinBuf) < 16 {
 			pinBuf = append(pinBuf, ch)
+			pinState.Store(pinIdle) // clear any prior "wrong" message as they retype
 			pInvalidateRect.Call(hwnd, 0, 1)
 		}
 	}
+}
+
+// submitPINAsync validates a PIN off the message-loop thread. SubmitPIN can
+// block on a network round trip (server unlock) or a named-pipe exchange (face
+// mode); running it inline would freeze the message pump and wedge the overlay.
+// The result is published via pinState and picked up by the next tick().
+func submitPINAsync(pin string) {
+	pinState.Store(pinChecking)
+	go func() {
+		ok := gCtrl.SubmitPIN(pin)
+		if ok {
+			// tick() sees Locked()==false and hides the overlay.
+			pinState.Store(pinIdle)
+			return
+		}
+		pinState.Store(pinWrong)
+	}()
 }
 
 func paint(hwnd uintptr) {
@@ -333,15 +390,22 @@ func paint(hwnd uintptr) {
 	draw(fontBig, red, "Time's up", band(int32(float64(h)*0.20), int32(float64(h)*0.38)), center)
 	draw(fontMid, white, "Earn more time or ask a parent", band(int32(float64(h)*0.40), int32(float64(h)*0.50)), center)
 
-	dots := ""
-	for range pinBuf {
-		dots += "\u25CF "
-	}
-	if dots == "" {
-		dots = "enter parent code, then press Enter"
-		draw(fontSmall, soft, dots, band(int32(float64(h)*0.56), int32(float64(h)*0.62)), center)
-	} else {
-		draw(fontMid, white, dots, band(int32(float64(h)*0.56), int32(float64(h)*0.62)), center)
+	pinRow := band(int32(float64(h)*0.56), int32(float64(h)*0.62))
+	switch pinState.Load() {
+	case pinChecking:
+		draw(fontSmall, soft, "checking\u2026", pinRow, center)
+	case pinWrong:
+		draw(fontSmall, red, "wrong code, try again", pinRow, center)
+	default:
+		dots := ""
+		for range pinBuf {
+			dots += "\u25CF "
+		}
+		if dots == "" {
+			draw(fontSmall, soft, "enter parent code, then press Enter", pinRow, center)
+		} else {
+			draw(fontMid, white, dots, pinRow, center)
+		}
 	}
 
 	status := "If a parent grants time on their phone, this clears automatically."

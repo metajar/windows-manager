@@ -69,12 +69,28 @@ filter, and an empty capability set. State (the JSON db) lives in
 
 ### Agent (Windows, MSI)
 
-Install with a double-click, or silently from an elevated prompt with your
-settings as properties:
+**Requires an elevated (Administrator) command prompt.** The MSI installs a
+LocalSystem service; a normal `cmd` window will fail silently with `/qn`.
+
+Quote the `SERVER` URL — `msiexec` misparses `http://...` without quotes:
 
 ```bat
-msiexec /i rewardd-agent.msi /qn ^
-  SERVER=http://homelab:8080 TOKEN=your-token KIDUSER=leo PIN=1234
+msiexec /i rewardd-agent.msi /qn /L*v "%TEMP%\rewardd-install.log" ^
+  SERVER="http://192.168.88.70:8080" TOKEN=your-token KIDUSER=leo PIN=1234
+```
+
+Or use the helper script from an elevated prompt:
+
+```bat
+scripts\install-agent.bat rewardd-agent.msi "http://192.168.88.70:8080" your-token leo 1234
+```
+
+If install fails, open `%TEMP%\rewardd-install.log` or run without `/qn` to see
+the error dialog. To clean up a half-installed run:
+
+```bat
+msiexec /x rewardd-agent.msi
+sc delete rewardd-agent-svc
 ```
 
 The MSI installs `rewardd-agent.exe` to `Program Files\rewardd`, writes the

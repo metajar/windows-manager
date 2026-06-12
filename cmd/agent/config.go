@@ -104,6 +104,11 @@ func resolveConfig(args []string, getenv func(string) string) (resolved, error) 
 	if err := fs.Parse(args); err != nil {
 		return resolved{}, err
 	}
+	// The MSI passes -machine "" when MACHINE is unset; treat that as "use hostname"
+	// rather than an empty label (flag.Parse does not apply flag defaults for "").
+	if cfg.machine == "" {
+		cfg.machine = host
+	}
 
 	out := resolved{cfg: cfg, configPath: *cfgPathFlag}
 	switch {

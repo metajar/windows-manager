@@ -194,9 +194,19 @@ func installService(cfg config, configPath string) error {
 	}
 	defer m.Disconnect()
 
+	// Idempotent: a failed MSI retry (or reinstall) may leave the service behind.
 	if s, err := m.OpenService(serviceName); err == nil {
-		s.Close()
-		return fmt.Errorf("service %q already exists; uninstall first", serviceName)
+		defer s.Close()
+		log.Printf("service %q already exists, refreshing config and restarting", serviceName)
+		if _, err := s.Control(svc.Stop); err != nil {
+			log.Printf("stop service (ignored): %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if err := s.Start(); err != nil {
+			return fmt.Errorf("restart service: %w", err)
+		}
+		log.Printf("service %q running with config at %s", serviceName, configPath)
+		return nil
 	}
 	s, err := m.CreateService(serviceName, exe, mgr.Config{
 		DisplayName:  "rewardd agent (brain)",
