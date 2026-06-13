@@ -38,8 +38,9 @@ var (
 	pSetTimer          = user32.NewProc("SetTimer")
 	pGetSystemMetrics  = user32.NewProc("GetSystemMetrics")
 	pLoadCursorW       = user32.NewProc("LoadCursorW")
-	pSetWindowsHookExW = user32.NewProc("SetWindowsHookExW")
-	pCallNextHookEx    = user32.NewProc("CallNextHookEx")
+	pSetWindowsHookExW   = user32.NewProc("SetWindowsHookExW")
+	pCallNextHookEx      = user32.NewProc("CallNextHookEx")
+	pEnumDisplayMonitors = user32.NewProc("EnumDisplayMonitors")
 
 	pCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
 	pSetTextColor     = gdi32.NewProc("SetTextColor")
@@ -70,10 +71,11 @@ const (
 	smCXVirtual = 78
 	smCYVirtual = 79
 
-	wmDestroy = 0x0002
-	wmPaint   = 0x000F
-	wmTimer   = 0x0113
-	wmChar    = 0x0102
+	wmDestroy     = 0x0002
+	wmPaint       = 0x000F
+	wmTimer       = 0x0113
+	wmChar        = 0x0102
+	wmLButtonDown = 0x0201
 
 	dtCenter     = 0x0001
 	dtVCenter    = 0x0004
@@ -385,8 +387,9 @@ func submitPINAsync(pin string) {
 // along the top of the primary monitor. A MessageBox proved useless here: it
 // sat behind the fullscreen game until the lock overlay revealed it, and it
 // blocked forever waiting for an OK nobody could click. The banner is our own
-// window, so the tick can re-assert its z-order above the game, and it is
-// no-activate + click-through so it never steals the game's input.
+// window, so the tick can re-assert its z-order above the game. It is
+// no-activate so it never steals the game's keyboard focus, but it does take
+// mouse clicks: a click dismisses it.
 func createWarnBanner(hInst, cursor uintptr) {
 	warnBrush, _, _ = pCreateSolidBrush.Call(0x00226ab8) // amber, COLORREF is BGR
 
@@ -408,7 +411,7 @@ func createWarnBanner(hInst, cursor uintptr) {
 	warnW = int32(metric(smCXScreen))
 	warnH = 110
 	hwnd, _, err := pCreateWindowExW.Call(
-		wsExTopmost|wsExToolWindow|wsExNoActivate|wsExTransparent,
+		wsExTopmost|wsExToolWindow|wsExNoActivate,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(u16("rewardd warning"))),
 		wsPopup,
@@ -424,6 +427,12 @@ func createWarnBanner(hInst, cursor uintptr) {
 
 func warnProc(hwnd uintptr, message uint32, wParam, lParam uintptr) uintptr {
 	switch message {
+	case wmLButtonDown:
+		// Click dismisses. warnProc runs on the message-loop thread (the
+		// banner was created there), so touching warnVisible is safe.
+		pShowWindow.Call(hwnd, swHide)
+		warnVisible = false
+		return 0
 	case wmPaint:
 		paintWarn(hwnd)
 		return 0
@@ -483,6 +492,46 @@ func paintWarn(hwnd uintptr) {
 	pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 }
 
+// monitorRects collects the screen-coordinate rect of every display. The
+// callback runs synchronously inside the EnumDisplayMonitors call on the
+// message-loop thread, so plain package state is fine.
+var (
+	enumRects   []rect
+	enumMonCB   uintptr
+	enumMonOnce bool
+)
+
+func monitorRects() []rect {
+	if !enumMonOnce {
+		// NewCallback registrations are permanent; create exactly one.
+		enumMonCB = syscall.NewCallback(func(hMon, hdc, lprc, lparam uintptr) uintptr {
+			enumRects = append(enumRects, *(*rect)(unsafe.Pointer(lprc)))
+			return 1 // keep enumerating
+		})
+		enumMonOnce = true
+	}
+	enumRects = enumRects[:0]
+	pEnumDisplayMonitors.Call(0, 0, enumMonCB, 0)
+	return enumRects
+}
+
+// lockMessageAreas returns one rect per monitor in window-client coordinates.
+// The lock window spans the whole virtual desktop; drawing the message once,
+// centered across that combined area, splits it over the bezel on multi-monitor
+// setups (or parks it entirely on one screen). Repeating it per monitor puts a
+// complete message on every display.
+func lockMessageAreas(client rect) []rect {
+	monitors := monitorRects()
+	if len(monitors) == 0 {
+		return []rect{client}
+	}
+	areas := make([]rect, 0, len(monitors))
+	for _, m := range monitors {
+		areas = append(areas, rect{m.left - vx, m.top - vy, m.right - vx, m.bottom - vy})
+	}
+	return areas
+}
+
 func paint(hwnd uintptr) {
 	var ps paintStruct
 	hdc, _, _ := pBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
@@ -493,8 +542,20 @@ func paint(hwnd uintptr) {
 
 	pSetBkMode.Call(hdc, bkTransparent)
 
-	band := func(top, bottom int32) rect { return rect{rc.left, top, rc.right, bottom} }
-	h := rc.bottom - rc.top
+	for _, area := range lockMessageAreas(rc) {
+		drawLockMessage(hdc, area)
+	}
+
+	pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+}
+
+// drawLockMessage renders the full lock-screen text block within one area
+// (one monitor), with all bands positioned relative to that area.
+func drawLockMessage(hdc uintptr, area rect) {
+	band := func(topFrac, bottomFrac float64) rect {
+		h := float64(area.bottom - area.top)
+		return rect{area.left, area.top + int32(h*topFrac), area.right, area.top + int32(h*bottomFrac)}
+	}
 
 	draw := func(font uintptr, color uintptr, text string, r rect, flags uintptr) {
 		pSelectObject.Call(hdc, font)
@@ -509,10 +570,10 @@ func paint(hwnd uintptr) {
 
 	center := uintptr(dtCenter | dtVCenter | dtSingleLine | dtNoPrefix)
 
-	draw(fontBig, red, "Time's up", band(int32(float64(h)*0.20), int32(float64(h)*0.38)), center)
-	draw(fontMid, white, "Earn more time or ask a parent", band(int32(float64(h)*0.40), int32(float64(h)*0.50)), center)
+	draw(fontBig, red, "Time's up", band(0.20, 0.38), center)
+	draw(fontMid, white, "Earn more time or ask a parent", band(0.40, 0.50), center)
 
-	pinRow := band(int32(float64(h)*0.56), int32(float64(h)*0.62))
+	pinRow := band(0.56, 0.62)
 	switch pinState.Load() {
 	case pinChecking:
 		draw(fontSmall, soft, "checking\u2026", pinRow, center)
@@ -534,9 +595,7 @@ func paint(hwnd uintptr) {
 	if !gCtrl.Online() {
 		status = "Offline: only the local emergency code works right now."
 	}
-	draw(fontSmall, soft, status, band(int32(float64(h)*0.80), int32(float64(h)*0.86)), center|uintptr(dtWordBreak))
-
-	pEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+	draw(fontSmall, soft, status, band(0.80, 0.86), center|uintptr(dtWordBreak))
 }
 
 // hookProc swallows the usual escape hatches while locked. It cannot intercept
